@@ -36,7 +36,7 @@ function shogi24_proto.dissector(buffer, pinfo, tree)
         local byte_rawstr = byte_array:raw()  -- ByteArrayの数字をそのまま文字列に変換。（int[]→stringへの変換みたいな感じ？）
         local byte_hexstr = tostring( byte_array )  -- ByteArrayの数字をHex表記の文字列に変換。
 
-        -- bufferに文字列"StartGameCommand" があれば、対局情報をcsaファイルに書き込み。tmpfile.raw へ csaファイルのファイル名を書き込み。
+        -- bufferに文字列"StartGameCommand" があれば、filename.tmp及び0.tmpファイルを作成し、対局情報を書き込み。
         local a1, b1 = string.find(byte_hexstr , "537461727447616D65436F6D6D616E64")  -- "StartGameCommand"
         if a1 ~= nil then
             local a2, b2 = string.find(byte_hexstr , "73720028636F6D2E73686F6769646F6A6F2E73686F67692E636F6D6D6F6E2E47616D65436F6E646974696F6E") -- "sr.(com.shogidojo.shogi.common.GameCondition"
@@ -55,12 +55,14 @@ function shogi24_proto.dissector(buffer, pinfo, tree)
             --保存するkifufile（csaファイル）の名前  
             local filename = start_ts.."_"..p1name.."_vs_"..p2name..".csa"
 
-            -- kifufile名を記憶するためのファイル。
-            local tmpfile = io.open(folderpath.."tmpfile.raw", "w")
+
+            -- filename.tmpファイルへ、最終的に作成するcsaファイル名を書き込み。
+            local tmpfile = io.open(folderpath.."filename.tmp", "w")
             tmpfile:write(filename)
             tmpfile:close()
 
-            local kifufile = io.open(folderpath..filename, "w")
+            -- 0.tmpファイルへ、csaファイルに必要な対局者情報等を書き込み。
+            local kifufile = io.open(folderpath.."0.tmp", "w")
             kifufile:write("N+"..p1name.."\n")
             kifufile:write("N-"..p2name.."\n")           
             kifufile:write("$START_TIME:"..start_y.."/"..start_m.."/"..start_d.." "..start_H..":"..start_M.."\n")
@@ -76,34 +78,30 @@ function shogi24_proto.dissector(buffer, pinfo, tree)
             kifufile:write("P9+KY+KE+GI+KI+OU+KI+GI+KE+KY\n")
             kifufile:write("\'先手番\n")
             kifufile:write("+\n")
-
             kifufile:close()
+            
         end
 
-        -- bufferに文字列"promotionxp" があれば、 kifufileへ棋譜符号を書き込み。
+        -- bufferに文字列"promotionxp" があれば、 xxx.tmp（xxxは指し手数）へ棋譜符号と消費時間を書き込み。
         local prom1, prom2 = string.find(byte_hexstr , "70726F6D6F74696F6E7870")  -- "promotionxp"
         if prom1 ~= nil then
             -- buffer から指し手の符号情報を読み込み
             local tmpbuf = buffer((prom2-1)/2+1,9)
             local first_move = tmpbuf(0,1):le_uint() -- 1なら先手、0なら後手
             local piece = tmpbuf(1,1):le_uint() -- 駒種を定義する数値(int)に変換
-            local last_posi_x = tmpbuf(2,1):le_uint()  --駒のもと居た筋。駒台から打ったら0
+            local last_posi_x = tmpbuf(2,1):le_uint()  -- 駒のもと居た筋。駒台から打ったら0
             local last_posi_y = tmpbuf(3,1):le_uint()
-            local move_to_x = tmpbuf(4,1):le_uint()  --駒の移動した先の筋。
+            local move_to_x = tmpbuf(4,1):le_uint()  -- 駒の移動した先の筋。
             local move_to_y = tmpbuf(5,1):le_uint()
-            local movenum = tmpbuf(6,2):uint()
-            local promo = tmpbuf(8,1):uint()
-            local used_time = buffer((prom2-1)/2+1+80,2):uint()
+            local movenum = tmpbuf(6,2):uint()  -- 初手からの手数（初手01から1ずつ増加）
+            local promo = tmpbuf(8,1):uint()  -- 1なら成り、0なら成らず
+            local used_time = buffer((prom2-1)/2+1+80,2):uint()  -- その手の消費時間
             piece_list = {"OU","HI","KA","KI","GI","KE","KY","FU"}
             piece_promo_list = {"","RY","UM","","NG","NK","NY","TO"}
 
-            -- 棋譜を書き込むファイル名（writefile_name）を"tmpfile.raw"から取得
-            local readfile = io.open(folderpath.."tmpfile.raw", "r")     
-            local writefile_name = readfile:read("*a")
-            readfile:close() 
-            
+
             ---- 棋譜の書き込み。ここから-----
-            local kifufile = io.open(folderpath..writefile_name, "a")
+            local kifufile = io.open(folderpath..movenum..".tmp", "w")
             if first_move == 1 then 
                 kifufile:write("+")
             else 
@@ -122,19 +120,33 @@ function shogi24_proto.dissector(buffer, pinfo, tree)
             ---- 棋譜の書き込み。ここまで-----
         end
         
-        -- bufferに文字列"EndGameCommand" があれば、 kifufileへ投了を書き込み。     
+        -- bufferに文字列"EndGameCommand" があれば、 xxx.tmpファイルを全て読み込んで1つのcsaファイルを生成。     
         local endstr1, endstr2 = string.find(byte_hexstr , "456E6447616D65436F6D6D616E64")  -- "EndGameCommand"
         if endstr1 ~= nil then
-            -- 棋譜を書き込むファイル名（writefile_name）を"tmpfile.raw"から取得
-            local readfile = io.open(folderpath.."tmpfile.raw", "r")     
-            local writefile_name = readfile:read("*a")
-            readfile:close() 
-            ---- 棋譜の書き込み。ここから-----
-            local kifufile = io.open(folderpath..writefile_name, "a")
-            kifufile:write("%TORYO\n")
-            kifufile:close()
-            ---- 棋譜の書き込み。ここまで-----
-            os.remove(folderpath.."tmpfile.raw")
+            local filenametmp = io.open(folderpath.."filename.tmp", "r")
+            if filenametmp ~= nil then
+                local writefile_name = filenametmp:read("*a")
+                filenametmp:close() 
+                -- 読み込みの終わったfilename.tmpファイルを削除
+                os.remove(folderpath.."filename.tmp")
+            
+                local kifufile = io.open(folderpath..writefile_name, "w")
+                local moveint = 0
+                local movenumfile = io.open(folderpath..moveint..".tmp","r")
+                repeat 
+                    local filedata = movenumfile:read("*a")
+                    kifufile:write(filedata)
+                    movenumfile:close()
+                    -- 読み込みの終わった.tmpファイルを削除
+                    os.remove(folderpath..moveint..".tmp")
+                    movenumfile = nil
+                    moveint = moveint + 1
+                    movenumfile = io.open(folderpath..moveint..".tmp","r")
+                until ( movenumfile == nil )
+
+                kifufile:write("%TORYO\n")
+                kifufile:close()
+            end
         end
 
     end
@@ -144,5 +156,4 @@ end
 -- TCP port 9999 をshogi24_protoと解釈する
 tcp_table = DissectorTable.get("tcp.port")
 tcp_table:add(9999, shogi24_proto)
-
 
